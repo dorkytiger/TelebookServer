@@ -1,0 +1,13 @@
+# 环境与密钥
+.env
+
+# 构建产物
+/server
+*.exe
+
+# 日志
+*.log
+
+# IDE
+.idea/
+.vscode/

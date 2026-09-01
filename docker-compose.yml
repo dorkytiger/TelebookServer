@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: telebook
+      POSTGRES_USER: telebook
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-telebook}
+    ports:
+      - "15432:5432"     # 宿主机 15432 → 容器 5432（避免占用默认 5432）
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telebook -d telebook"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Redis：M6 refresh token 存储（access/refresh 双 token）
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "16379:6379"     # 宿主机 16379 → 容器 6379（避免占用默认 6379）
+    volumes:
+      - redisdata:/data
+
+  # MinIO：M4 文件同步使用（M1-M3 可不用，先起好）
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-telebook}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-telebook123456}
+    ports:
+      - "19000:9000"     # 对象存储 API（避免占用默认 9000）
+      - "19001:9001"     # 管理控制台（避免占用默认 9001）
+    volumes:
+      - miniodata:/data
+
+  api:
+    build: .
+    environment:
+      HTTP_ADDR: :8080
+      DATABASE_URL: postgres://telebook:${POSTGRES_PASSWORD:-telebook}@postgres:5432/telebook?sslmode=disable
+      SYNC_SECRET: ${SYNC_SECRET:?SYNC_SECRET 必填，见 .env.example}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 必填，见 .env.example}
+      # M4 文件同步（MinIO）：不配置则文件接口返回 503
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-telebook}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-telebook123456}
+      MINIO_BUCKET: telebook-files
+      # M6 双 token：refresh token 存 Redis
+      REDIS_ADDR: redis:6379
+      # MinIO 对外端口（host 自动从请求推断，手机与 API 同地址可达）
+      MINIO_PUBLIC_PORT: ${MINIO_PUBLIC_PORT:-9000}
+      # 可选：完整公网地址 host:port，显式覆盖自动推断（旧配置兼容）
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}
+    ports:
+      - "18080:8080"     # 宿主机 18080 → 容器 8080（避免占用默认 8080）
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata: {}
+  miniodata: {}
+  redisdata: {}
