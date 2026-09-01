@@ -11,8 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-
 	"TelebookServer/internal/api"
 	"TelebookServer/internal/config"
 	"TelebookServer/internal/service"
@@ -40,7 +38,7 @@ func run() error {
 	}
 	defer pool.Close()
 
-	if err := store.MigrateUp(cfg.DatabaseURL); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+	if err := store.MigrateUp(cfg.DatabaseURL); err != nil {
 		return err
 	}
 

@@ -22,7 +22,7 @@ docker compose up --build
 
 - API: http://localhost:18080
 - MinIO 控制台: http://localhost:19001
-- 迁移自动执行（golang-migrate 内嵌 SQL）
+- 表结构启动时自动幂等建表（`CREATE TABLE IF NOT EXISTS`）
 
 ## 手动运行
 

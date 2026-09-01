@@ -2,22 +2,12 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"embed"
-	"errors"
 	"fmt"
 
-	"github.com/golang-migrate/migrate/v4"
-	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib" // 注册 pgx 的 database/sql 驱动（迁移用）
 )
-
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
 
 // Pool 数据访问的最小接口（*pgxpool.Pool 满足），便于测试替换。
 type Pool interface {
@@ -40,31 +30,117 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// MigrateUp 执行嵌入的 SQL 迁移（启动时自动，无需单独迁移步骤）。
-//
-// golang-migrate 的 pgx 驱动需要 *sql.DB，这里用 pgx stdlib 单独开一个
-// 迁移连接，用完即关，不影响主连接池。
-func MigrateUp(databaseURL string) error {
-	db, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		return fmt.Errorf("open migrate connection: %w", err)
-	}
-	defer db.Close()
+// schema 建表语句（初始化项目，直接幂等建表，不做版本化迁移）。
+// 全部使用 IF NOT EXISTS，重复启动安全。
+var schema = []string{
+	// 设备（单用户，认证粒度为设备）
+	`CREATE TABLE IF NOT EXISTS devices (
+		id           TEXT PRIMARY KEY,
+		name         TEXT NOT NULL,
+		platform     TEXT NOT NULL,
+		key_hash     TEXT NOT NULL,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
 
-	src, err := iofs.New(migrationsFS, "migrations")
-	if err != nil {
-		return fmt.Errorf("load migrations: %w", err)
-	}
-	driver, err := pgxmigrate.WithInstance(db, &pgxmigrate.Config{})
-	if err != nil {
-		return fmt.Errorf("create migrate driver: %w", err)
-	}
-	m, err := migrate.NewWithInstance("iofs", src, "pgx5", driver)
-	if err != nil {
-		return fmt.Errorf("init migrate: %w", err)
-	}
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return fmt.Errorf("run migrations: %w", err)
+	// 书籍当前态（current_book 是同步的当前视图）
+	`CREATE TABLE IF NOT EXISTS current_book (
+		entity_id    TEXT PRIMARY KEY,
+		name         TEXT NOT NULL,
+		current_page INTEGER NOT NULL DEFAULT 0,
+		cover_hash   TEXT,
+		files        JSONB NOT NULL DEFAULT '[]'::jsonb,
+		revision     BIGINT NOT NULL DEFAULT 0,
+		deleted      BOOLEAN NOT NULL DEFAULT false,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 通用实体当前态（非书籍实体，预留）
+	`CREATE TABLE IF NOT EXISTS entities (
+		entity_type TEXT NOT NULL,
+		entity_id   TEXT NOT NULL,
+		revision    BIGINT NOT NULL DEFAULT 0,
+		deleted     BOOLEAN NOT NULL DEFAULT false,
+		payload     JSONB,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (entity_type, entity_id)
+	)`,
+
+	// 事件流（push/pull 同步的持久化日志）
+	`CREATE TABLE IF NOT EXISTS sync_events (
+		id          BIGSERIAL PRIMARY KEY,
+		change_id   TEXT NOT NULL,
+		entity_type TEXT NOT NULL,
+		entity_id   TEXT NOT NULL,
+		revision    BIGINT NOT NULL,
+		device_id   TEXT NOT NULL,
+		op          TEXT NOT NULL,
+		payload     JSONB,
+		status      TEXT NOT NULL DEFAULT 'done',
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_sync_events_entity ON sync_events (entity_type, entity_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_sync_events_status_id ON sync_events (status, id)`,
+
+	// 每设备的游标（增量拉取位置）
+	`CREATE TABLE IF NOT EXISTS sync_cursors (
+		device_id     TEXT PRIMARY KEY,
+		last_event_id BIGINT NOT NULL DEFAULT 0,
+		updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 冲突（乐观锁失败时记录，供客户端选择解决策略）
+	`CREATE TABLE IF NOT EXISTS conflicts (
+		id               BIGSERIAL PRIMARY KEY,
+		event_id         BIGINT NOT NULL REFERENCES sync_events(id),
+		entity_type      TEXT NOT NULL,
+		entity_id        TEXT NOT NULL,
+		base_revision    BIGINT NOT NULL,
+		current_revision BIGINT NOT NULL,
+		status           TEXT NOT NULL DEFAULT 'open',
+		resolved_by      TEXT,
+		resolved_at      TIMESTAMPTZ,
+		created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 整库快照历史（归档：操作后的整库状态）
+	`CREATE TABLE IF NOT EXISTS book_history (
+		id         BIGSERIAL PRIMARY KEY,
+		op_type    TEXT NOT NULL,
+		tag        TEXT NOT NULL DEFAULT '',
+		payload    JSONB NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 文件元数据（SHA-256 内容寻址，去重）
+	`CREATE TABLE IF NOT EXISTS file_meta (
+		hash         TEXT PRIMARY KEY,
+		size         BIGINT NOT NULL DEFAULT 0,
+		mime_type    TEXT NOT NULL DEFAULT '',
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		last_used_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+}
+
+// EnsureSchema 启动时幂等建表（表不存在才创建，重复执行安全）。
+func EnsureSchema(ctx context.Context, pool Pool) error {
+	for _, stmt := range schema {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("ensure schema: %w", err)
+		}
 	}
 	return nil
+}
+
+// MigrateUp 兼容旧调用（客户端代码/文档引用）：改为幂等建表。
+func MigrateUp(databaseURL string) error {
+	ctx := context.Background()
+	pool, err := Open(ctx, databaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	return EnsureSchema(ctx, pool)
 }
