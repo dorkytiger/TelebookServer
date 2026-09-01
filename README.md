@@ -98,13 +98,3 @@ go test ./...
 | POST | `/api/v1/files/upload/complete` | JWT | 完成分片上传 |
 | GET | `/api/v1/files/download` | JWT | 预签名下载（302 跳转） |
 
-## 里程碑
-
-- [x] **M1** 骨架与认证：项目结构 / docker-compose / 迁移 / 密钥换 token / /ping
-- [x] **M2** 元数据同步（sync_events 事件日志 + push/pull + cursor）
-- [x] **M3** 冲突处理（乐观锁 + 三策略解决）
-- [x] **M4** 文件同步（MinIO 分片上传 + 预签名下载 + 地址自动推断）
-- [x] **M5** 客户端同步（TeleBook 3.1：本地优先 + 同步页面）
-- [x] **M6** 历史记录（整库快照 + 恢复）
-
-详见 [docs/roadmap.md](docs/roadmap.md)。
