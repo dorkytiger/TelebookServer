@@ -173,21 +173,35 @@ func (s *MinioObjectStore) PresignDownload(ctx context.Context, key, host string
 }
 
 // GetObject 打开对象内容（流式读取；供 API 代理下载，MinIO 无需公网端口）。
-func (s *MinioObjectStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+func (s *MinioObjectStore) GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error) {
 	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	// 立即探测一次，区分"对象不存在"与"打开成功"
-	if _, err := obj.Stat(); err != nil {
+	// 立即探测一次，区分"对象不存在"与"打开成功"，并拿到大小
+	info, err := obj.Stat()
+	if err != nil {
 		obj.Close()
 		var resp minio.ErrorResponse
 		if errors.As(err, &resp) && resp.Code == "NoSuchKey" {
-			return nil, ErrObjectNotFound
+			return nil, 0, ErrObjectNotFound
 		}
-		return nil, err
+		return nil, 0, err
 	}
-	return obj, nil
+	return obj, info.Size, nil
+}
+
+// ObjectSize 返回对象实际大小（用于校验；不存在返回 ErrObjectNotFound）。
+func (s *MinioObjectStore) ObjectSize(ctx context.Context, key string) (int64, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		var resp minio.ErrorResponse
+		if errors.As(err, &resp) && resp.Code == "NoSuchKey" {
+			return 0, ErrObjectNotFound
+		}
+		return 0, err
+	}
+	return info.Size, nil
 }
 
 // 确保 ObjectStore 接口被满足。

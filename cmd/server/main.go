@@ -80,6 +80,8 @@ func run() error {
 			return fmt.Errorf("ensure minio bucket: %w", err)
 		}
 		fileSvc = service.NewFileService(objStore, store.NewPGFileStore(pool))
+		// 整本书文件完整性校验：push 落库前确保文件都已完整上传
+		syncSvc.SetFileVerifier(fileSvc)
 		log.Printf("minio: bucket %q ready", cfg.MinIOBucket)
 	}
 

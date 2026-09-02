@@ -30,19 +30,55 @@ func NewFileService(objects store.ObjectStore, files store.FileStore) *FileServi
 	return &FileService{objects: objects, files: files}
 }
 
+// AllFilesComplete 校验文件列表是否全部在对象存储完整存在（实际大小 == 声明大小）。
+// 实现 FileVerifier：任一文件缺失/大小不符 → false。
+func (s *FileService) AllFilesComplete(ctx context.Context, files []model.BookFileMeta) (bool, error) {
+	for _, f := range files {
+		if f.Hash == "" {
+			continue
+		}
+		size, err := s.objects.ObjectSize(ctx, objectKey(f.Hash))
+		if err != nil {
+			if errors.Is(err, store.ErrObjectNotFound) {
+				return false, nil // 缺失
+			}
+			return false, err
+		}
+		if size != f.Size {
+			// 实际大小与声明不符：对象不完整/损坏
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// objectKey 返回对象键前缀。
 func objectKey(hash string) string { return "files/" + hash }
 
 // CheckFiles 批量比对：返回远端缺失清单。
+//
+// 存在性基于 MinIO **实际对象大小**与客户端声明的 size 对比：
+// 对象不存在、或实际大小与声明不符（上传不完整/曾损坏），一律判为缺失，
+// 驱使客户端重新上传（内容寻址：重新上传会用真实文件大小）。
 func (s *FileService) CheckFiles(ctx context.Context, items []model.FileCheckItem) (*model.FileCheckResponse, error) {
-	hashes := make([]string, 0, len(items))
+	missing := make([]model.FileCheckItem, 0, len(items))
 	for _, it := range items {
-		hashes = append(hashes, it.Hash)
+		size, err := s.objects.ObjectSize(ctx, objectKey(it.Hash))
+		if err != nil {
+			if errors.Is(err, store.ErrObjectNotFound) {
+				missing = append(missing, it)
+				continue
+			}
+			// 存储查询异常：保守起见视为缺失（客户端会尝试重传）
+			missing = append(missing, it)
+			continue
+		}
+		if size != it.Size {
+			// 实际大小与声明不符：对象损坏/不完整 → 判缺失，触发重传
+			missing = append(missing, it)
+		}
 	}
-	found, err := s.files.HasHashes(ctx, hashes)
-	if err != nil {
-		return nil, err
-	}
-	return &model.FileCheckResponse{Missing: store.MissingHashes(items, found)}, nil
+	return &model.FileCheckResponse{Missing: missing}, nil
 }
 
 // InitUpload 初始化分片上传。文件已存在时返回 complete=true（幂等）。
@@ -100,10 +136,6 @@ func (s *FileService) PresignDownload(ctx context.Context, hash, host string) (s
 
 // Download 打开文件内容流（API 代理下载：MinIO 无需公网端口）。
 // 调用方负责 Close 返回的流；文件不存在返回 ErrObjectNotFound。
-func (s *FileService) Download(ctx context.Context, hash string) (io.ReadCloser, error) {
-	rc, err := s.objects.GetObject(ctx, objectKey(hash))
-	if err != nil {
-		return nil, err
-	}
-	return rc, nil
+func (s *FileService) Download(ctx context.Context, hash string) (io.ReadCloser, int64, error) {
+	return s.objects.GetObject(ctx, objectKey(hash))
 }

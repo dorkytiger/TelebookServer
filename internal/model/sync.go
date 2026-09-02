@@ -87,8 +87,9 @@ const (
 
 // 结果原因。
 const (
-	ReasonConflict  = "conflict"
-	ReasonDuplicate = "duplicate"
+	ReasonConflict        = "conflict"
+	ReasonDuplicate       = "duplicate"
+	ReasonFilesIncomplete = "files_incomplete" // 书的文件未完整上传（服务器拒绝，客户端补传)
 )
 
 // BookFileMeta 书籍内单个文件（hash 引用，内容寻址 → 跨设备去重）。

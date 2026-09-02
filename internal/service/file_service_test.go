@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"TelebookServer/internal/model"
@@ -17,20 +18,38 @@ func TestFileCheck(t *testing.T) {
 	s := newTestFileService()
 	ctx := context.Background()
 
-	// 登记一个已存在文件
-	if err := s.files.UpsertMeta(ctx, "hash-a", 4, ""); err != nil {
-		t.Fatal(err)
+	// 上传完整对象 "hash-a"（8 字节），使其真正存在
+	initResp, err := s.InitUpload(ctx, "hash-a", 8)
+	if err != nil || initResp.UploadID == "" {
+		t.Fatalf("init: %+v err=%v", initResp, err)
+	}
+	e1, _ := s.UploadPart(ctx, "hash-a", initResp.UploadID, 1, []byte("1234"))
+	e2, _ := s.UploadPart(ctx, "hash-a", initResp.UploadID, 2, []byte("5678"))
+	if err := s.CompleteUpload(ctx, "hash-a", initResp.UploadID, 8, []store.UploadPartMeta{
+		{PartNumber: 1, ETag: e1},
+		{PartNumber: 2, ETag: e2},
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
 	}
 
 	resp, err := s.CheckFiles(ctx, []model.FileCheckItem{
-		{Hash: "hash-a", Size: 4},
-		{Hash: "hash-b", Size: 5},
+		{Hash: "hash-a", Size: 8}, // 完整 → 不缺失
+		{Hash: "hash-b", Size: 5}, // 不存在 → 缺失
+		{Hash: "hash-a", Size: 7}, // 大小与声明不符 → 缺失（损坏判定）
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Missing) != 1 || resp.Missing[0].Hash != "hash-b" {
-		t.Fatalf("unexpected missing: %+v", resp.Missing)
+	if len(resp.Missing) != 2 {
+		t.Fatalf("expected 2 missing (hash-b + size-mismatch), got %+v", resp.Missing)
+	}
+	// hash-b 与大小不符的 hash-a 都要出现
+	missingHashes := map[string]bool{}
+	for _, m := range resp.Missing {
+		missingHashes[fmt.Sprintf("%s:%d", m.Hash, m.Size)] = true
+	}
+	if !missingHashes["hash-b:5"] || !missingHashes["hash-a:7"] {
+		t.Fatalf("missing set wrong: %+v", resp.Missing)
 	}
 }
 

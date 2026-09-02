@@ -190,7 +190,7 @@ func FileCompleteUploadHandler(files *service.FileService) gin.HandlerFunc {
 }
 
 // FileDownloadHandler 代理下载：API 从 MinIO 读取文件流式返回。
-// MinIO 无需公网端口（客户端只访问 API）；兼容原 302 预签名流程的调用方。
+	// MinIO 无需公网端口（客户端只访问 API）；兼容原 302 预签名流程的调用方。
 func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		hash := c.Query("hash")
@@ -198,7 +198,7 @@ func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 			respondError(c, http.StatusUnprocessableEntity, "validation_error", "hash is required")
 			return
 		}
-		rc, err := files.Download(c.Request.Context(), hash)
+		rc, size, err := files.Download(c.Request.Context(), hash)
 		if err != nil {
 			if errors.Is(err, store.ErrObjectNotFound) {
 				respondError(c, http.StatusNotFound, "not_found", "file not found")
@@ -213,10 +213,10 @@ func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 		// 图片统一以 image/* 返回；客户端按内容落盘，无需精确 MIME
 		c.Header("Content-Type", "application/octet-stream")
 		c.Header("Cache-Control", "public, max-age=31536000, immutable") // 内容寻址：hash 即指纹，可长缓存
-		c.Stream(func(w io.Writer) bool {
-			_, err := io.Copy(w, rc)
-			return err == nil // 返回 false 停止
-		})
+		// 一次性流式写出（io.Copy 而非循环），不设 Content-Length，
+		// 让网关按 chunked 传输，避免按声明长度截断。
+		_, _ = io.Copy(c.Writer, rc)
+		_ = size
 	}
 }
 

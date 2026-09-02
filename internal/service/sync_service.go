@@ -12,12 +12,20 @@ import (
 
 // SyncService 元数据同步：push（乐观锁 + 事件写入）/ pull（游标增量）/ status / 冲突 / 归档。
 type SyncService struct {
-	entities  store.EntityStore
-	books     store.BookStore
-	history   store.HistoryStore
-	events    store.EventStore
-	cursors   store.CursorStore
-	conflicts store.ConflictStore
+	entities   store.EntityStore
+	books      store.BookStore
+	history    store.HistoryStore
+	events     store.EventStore
+	cursors    store.CursorStore
+	conflicts  store.ConflictStore
+	fileVerifier FileVerifier // 整本书文件完整性校验（可选；nil 则跳过校验）
+}
+
+// FileVerifier 校验一本书的所有文件是否已在对象存储完整存在。
+// 实现方应基于"实际对象大小 == 声明大小"判定（不完整/损坏 → false）。
+type FileVerifier interface {
+	// AllFilesComplete 返回 payload.files 是否全部完整存在。
+	AllFilesComplete(ctx context.Context, files []model.BookFileMeta) (bool, error)
 }
 
 func NewSyncService(entities store.EntityStore, books store.BookStore, history store.HistoryStore, events store.EventStore, cursors store.CursorStore, conflicts store.ConflictStore) *SyncService {
@@ -30,6 +38,9 @@ func NewSyncService(entities store.EntityStore, books store.BookStore, history s
 		conflicts: conflicts,
 	}
 }
+
+// SetFileVerifier 注入文件完整性校验器（main 里装配）。
+func (s *SyncService) SetFileVerifier(v FileVerifier) { s.fileVerifier = v }
 
 // ListHistory 列出归档（整库快照），按时间倒序。
 func (s *SyncService) ListHistory(ctx context.Context, limit int) ([]model.BookHistory, error) {
@@ -62,9 +73,33 @@ func (s *SyncService) RecordHistory(ctx context.Context, opType, tag string, sna
 //
 // source 为同步来源（manual=手动同步会话 / auto=自动或单操作），
 // 书籍变更会按 source 与内容差异推断是否写归档。
+//
+// 文件完整性：若注入了 FileVerifier，书事件落库前校验其全部文件已完整
+// （实际大小 == 声明大小）。不完整 → 拒绝该书（Accepted=false, reason=files_incomplete），
+// 驱动客户端清理垃圾文件并重传，避免把"半完成的书"写入库/事件流。
 func (s *SyncService) Push(ctx context.Context, deviceID, source string, changes []model.Change) ([]model.ChangeResult, error) {
 	results := make([]model.ChangeResult, 0, len(changes))
 	for _, c := range changes {
+		// 书事件：先校验文件完整性
+		if c.EntityType == model.EntityBook && s.fileVerifier != nil && c.Op != model.OpDelete && c.Payload != nil {
+			var p model.BookPayload
+			if err := json.Unmarshal(c.Payload, &p); err == nil && len(p.Files) > 0 {
+				ok, err := s.fileVerifier.AllFilesComplete(ctx, p.Files)
+				if err != nil {
+					return nil, fmt.Errorf("verify files %s/%s: %w", c.EntityType, c.EntityID, err)
+				}
+				if !ok {
+					results = append(results, model.ChangeResult{
+						EntityType: c.EntityType,
+						EntityID:   c.EntityID,
+						Accepted:   false,
+						Reason:     model.ReasonFilesIncomplete,
+					})
+					continue
+				}
+			}
+		}
+
 		var outcome *store.ChangeOutcome
 		var err error
 		if c.EntityType == model.EntityBook {

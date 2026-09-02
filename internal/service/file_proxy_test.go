@@ -28,7 +28,7 @@ func TestFileProxyDownload(t *testing.T) {
 	}
 
 	// 代理下载：流式读回内容
-	rc, err := s.Download(ctx, "proxy-hash")
+	rc, size, err := s.Download(ctx, "proxy-hash")
 	if err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
@@ -37,12 +37,15 @@ func TestFileProxyDownload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
+	if size != int64(len(data)) {
+		t.Fatalf("size mismatch: got %d want %d", size, len(data))
+	}
 	if string(data) != "helloworld" {
 		t.Fatalf("content mismatch: %q", string(data))
 	}
 
 	// 不存在的文件 → ErrObjectNotFound
-	if _, err := s.Download(ctx, "no-such-hash"); !errors.Is(err, store.ErrObjectNotFound) {
+	if _, _, err := s.Download(ctx, "no-such-hash"); !errors.Is(err, store.ErrObjectNotFound) {
 		t.Fatalf("expected ErrObjectNotFound, got %v", err)
 	}
 }
