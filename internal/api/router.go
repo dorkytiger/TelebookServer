@@ -15,7 +15,8 @@ type Dependencies struct {
 	JWT     *service.JWTService
 	Devices store.DeviceStore
 	Sync    *service.SyncService
-	Files   *service.FileService // 未配置 MinIO 时为 nil，文件接口返回 503
+	Files   *service.FileService   // 未配置 MinIO 时为 nil，文件接口返回 503
+	Upload  *service.UploadService // 书籍上传任务（§2.1.3；nil 则上传接口返回 503）
 }
 
 // NewRouter 组装路由。
@@ -41,6 +42,8 @@ func NewRouter(deps *Dependencies) *gin.Engine {
 			authed.POST("/sync/push", PushHandler(deps.Sync))
 			authed.GET("/sync/pull", PullHandler(deps.Sync))
 			authed.GET("/sync/status", SyncStatusHandler(deps.Sync))
+			authed.GET("/sync/library", LibraryStatusHandler(deps.Sync))
+			authed.GET("/sync/books", LibraryBooksHandler(deps.Sync))
 			authed.GET("/books/history", ListHistoryHandler(deps.Sync))
 			authed.POST("/books/history", RecordHistoryHandler(deps.Sync))
 			authed.POST("/books/restore", RestoreBookHandler(deps.Sync))
@@ -55,6 +58,17 @@ func NewRouter(deps *Dependencies) *gin.Engine {
 				authed.GET("/files/download", FileDownloadHandler(deps.Files))
 			} else {
 				authed.Any("/files/*path", FilesNotConfiguredHandler())
+			}
+
+			// 书籍上传任务（§2.1.3：init/status/complete + 单文件 done；abandon 放弃清理）
+			if deps.Upload != nil {
+				authed.POST("/upload/init", UploadInitHandler(deps.Upload))
+				authed.GET("/upload/status/:uuid", UploadStatusHandler(deps.Upload))
+				authed.POST("/upload/file/:uuid/done", UploadFileDoneHandler(deps.Upload))
+				authed.POST("/upload/complete/:uuid", UploadCompleteHandler(deps.Upload))
+				authed.POST("/upload/abandon/:uuid", UploadAbandonHandler(deps.Upload))
+			} else {
+				authed.Any("/upload/*path", FilesNotConfiguredHandler())
 			}
 		}
 	}

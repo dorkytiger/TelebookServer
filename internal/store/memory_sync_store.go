@@ -281,6 +281,7 @@ func (s *MemorySyncStore) SnapshotLibrary(_ context.Context) (json.RawMessage, e
 			CurrentPage: p.CurrentPage,
 			CoverHash:   coverHash,
 			Files:       files,
+			Revision:    book.revision,
 		})
 	}
 	return json.Marshal(items)

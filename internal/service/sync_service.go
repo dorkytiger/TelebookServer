@@ -12,13 +12,14 @@ import (
 
 // SyncService 元数据同步：push（乐观锁 + 事件写入）/ pull（游标增量）/ status / 冲突 / 归档。
 type SyncService struct {
-	entities   store.EntityStore
-	books      store.BookStore
-	history    store.HistoryStore
-	events     store.EventStore
-	cursors    store.CursorStore
-	conflicts  store.ConflictStore
-	fileVerifier FileVerifier // 整本书文件完整性校验（可选；nil 则跳过校验）
+	entities     store.EntityStore
+	books        store.BookStore
+	history      store.HistoryStore
+	events       store.EventStore
+	cursors      store.CursorStore
+	conflicts    store.ConflictStore
+	fileVerifier FileVerifier              // 整本书文件完整性校验（可选；nil 则跳过校验）
+	libVersion   store.LibraryVersionStore // 库版本存储（可选；nil 则不维护版本）
 }
 
 // FileVerifier 校验一本书的所有文件是否已在对象存储完整存在。
@@ -41,6 +42,68 @@ func NewSyncService(entities store.EntityStore, books store.BookStore, history s
 
 // SetFileVerifier 注入文件完整性校验器（main 里装配）。
 func (s *SyncService) SetFileVerifier(v FileVerifier) { s.fileVerifier = v }
+
+// SetLibraryStore 注入库版本存储（main 里装配；nil 则不维护版本）。
+func (s *SyncService) SetLibraryStore(v store.LibraryVersionStore) { s.libVersion = v }
+
+// RefreshLibraryVersion 重算整库版本 hash（§4）并写入 library_meta。
+// 读全库（deleted=false）→ 提取每本书的名字 + 文件清单 → ComputeLibraryVersion。
+// 幂等；库版本存储为 nil 时跳过。
+func (s *SyncService) RefreshLibraryVersion(ctx context.Context) error {
+	if s.libVersion == nil {
+		return nil
+	}
+	snapshot, err := s.books.SnapshotLibrary(ctx)
+	if err != nil {
+		return err
+	}
+	var items []model.BookSnapshotItem
+	if err := json.Unmarshal(snapshot, &items); err != nil {
+		return err
+	}
+	books := make([]store.LibraryBook, 0, len(items))
+	for _, it := range items {
+		var files []model.BookFileMeta
+		if err := json.Unmarshal(it.Files, &files); err != nil {
+			// files 可能是合法空/占位，解析失败当无文件
+			files = nil
+		}
+		books = append(books, store.LibraryBook{
+			UUID:  it.UUID,
+			Name:  it.Name,
+			Files: files,
+		})
+	}
+	version := store.ComputeLibraryVersion(books)
+	return s.libVersion.SetBookVersion(ctx, version)
+}
+
+// LibraryStatus 返回服务端当前库状态（§2.1 分支检测用）：
+// 远程书数（deleted=false）与整库版本 hash。
+type LibraryStatus struct {
+	BookCount   int    `json:"book_count"`
+	BookVersion string `json:"book_version"`
+}
+
+// GetLibraryStatus 查询服务端库状态。
+func (s *SyncService) GetLibraryStatus(ctx context.Context) (*LibraryStatus, error) {
+	snapshot, err := s.books.SnapshotLibrary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var items []model.BookSnapshotItem
+	if err := json.Unmarshal(snapshot, &items); err != nil {
+		return nil, err
+	}
+	version := ""
+	if s.libVersion != nil {
+		version, err = s.libVersion.GetBookVersion(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &LibraryStatus{BookCount: len(items), BookVersion: version}, nil
+}
 
 // ListHistory 列出归档（整库快照），按时间倒序。
 func (s *SyncService) ListHistory(ctx context.Context, limit int) ([]model.BookHistory, error) {
@@ -119,6 +182,11 @@ func (s *SyncService) Push(ctx context.Context, deviceID, source string, changes
 			Reason:     outcome.Reason,
 			ConflictID: outcome.ConflictID,
 		})
+	}
+
+	// 有成功应用的变更 → 重算整库版本（¥4，并发/匹配用）
+	if len(results) > 0 {
+		_ = s.RefreshLibraryVersion(ctx) // 版本维护失败不阻断 push（可下次刷新）
 	}
 	return results, nil
 }
@@ -221,4 +289,11 @@ func (s *SyncService) forceUpsert(ctx context.Context, conflict *model.Conflict,
 	}
 	_, err := s.entities.ForceUpsert(ctx, conflict.EntityType, conflict.EntityID, payload, deviceID)
 	return err
+}
+
+// GetLibraryBooks 返回服务端全量书清单（含每本书完整文件清单），
+// 供初始化同步「下载分支」乐观建书用（§2.1.2）。SnapshotLibrary 已是
+// deleted=false 的全量书 + files（rel_path/hash/size），直接透传。
+func (s *SyncService) GetLibraryBooks(ctx context.Context) (json.RawMessage, error) {
+	return s.books.SnapshotLibrary(ctx)
 }

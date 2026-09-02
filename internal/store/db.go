@@ -51,6 +51,8 @@ var schema = []string{
 		cover_hash   TEXT,
 		files        JSONB NOT NULL DEFAULT '[]'::jsonb,
 		revision     BIGINT NOT NULL DEFAULT 0,
+		-- 进度独立 revision（§4）：只增不减；进度更新不改 revision/book_version
+		progress_revision BIGINT NOT NULL DEFAULT 0,
 		deleted      BOOLEAN NOT NULL DEFAULT false,
 		created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 		updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -112,6 +114,37 @@ var schema = []string{
 		tag        TEXT NOT NULL DEFAULT '',
 		payload    JSONB NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 库级元数据（单行）：整库版本 hash（§4，不含进度）。
+	// 每次 current_book 变化时重算，供并发检测 / 初始化同步版本匹配。
+	`CREATE TABLE IF NOT EXISTS library_meta (
+		id           INTEGER PRIMARY KEY CHECK (id = 1),
+		book_version TEXT NOT NULL DEFAULT '',
+		updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 书籍上传任务（§2.1.3 上传状态机；uuid 由服务器分配，§6）。
+	`CREATE TABLE IF NOT EXISTS book_upload (
+		uuid         TEXT PRIMARY KEY,
+		name         TEXT NOT NULL,
+		status       TEXT NOT NULL DEFAULT 'uploading', -- uploading / done / failed
+		total_files  INTEGER NOT NULL DEFAULT 0,
+		done_files   INTEGER NOT NULL DEFAULT 0,
+		data_version TEXT NOT NULL DEFAULT '',
+		device_id    TEXT NOT NULL DEFAULT '',
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+
+	// 书籍上传任务的单文件进度（断点续传）。
+	`CREATE TABLE IF NOT EXISTS book_upload_file (
+		upload_uuid TEXT NOT NULL,
+		rel_path    TEXT NOT NULL,
+		hash        TEXT NOT NULL,
+		size        BIGINT NOT NULL DEFAULT 0,
+		status      TEXT NOT NULL DEFAULT 'pending', -- pending / done
+		PRIMARY KEY (upload_uuid, rel_path)
 	)`,
 
 	// 文件元数据（SHA-256 内容寻址，去重）

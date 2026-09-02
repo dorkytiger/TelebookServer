@@ -67,6 +67,30 @@ func (s *PGBookStore) ApplyBookChange(ctx context.Context, c *model.Change, sour
 		c.EntityID,
 	).Scan(&currentRev, &deleted, &oldPayload)
 
+	// 进度更新（op=progress，§3/§4）：只改 current_page + progress_revision，
+	// 不动 revision（不参与整库版本/乐观锁）、不写快照历史。
+	// 书不存在则视为已接受（进度无需创建书）。
+	if c.Op == model.OpProgress {
+		if err == nil {
+			p := parseBookPayload(c.Payload)
+			if _, err := tx.Exec(ctx, `
+				UPDATE current_book
+				SET current_page = $1, progress_revision = progress_revision + 1,
+				    updated_at = now()
+				WHERE entity_id = $2`,
+				p.CurrentPage, c.EntityID,
+			); err != nil {
+				return nil, err
+			}
+			// 写 progress 事件（其它设备 pull 到并应用进度，不参与整库版本）
+			if _, err := insertEvent(ctx, tx, c.ChangeID, model.EntityBook, c.EntityID,
+				currentRev, deviceID, model.OpProgress, c.Payload, "done"); err != nil {
+				return nil, err
+			}
+		}
+		return commitOutcome(ctx, tx, &ChangeOutcome{Accepted: true})
+	}
+
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		// 书不存在
@@ -252,10 +276,11 @@ func (s *PGBookStore) RestoreLibrary(ctx context.Context, snapshot json.RawMessa
 	return &model.BookRestoreResult{Restored: len(items), Revision: maxRev}, nil
 }
 
-// SnapshotLibrary 构建当前整库快照（deleted=false 的书籍数组）。
+// SnapshotLibrary 构建当前整库快照（deleted=false 的书籍数组，
+// 含每本书 revision 供客户端回填乐观锁基准）。
 func (s *PGBookStore) SnapshotLibrary(ctx context.Context) (json.RawMessage, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT entity_id, name, current_page, cover_hash, files
+		SELECT entity_id, name, current_page, cover_hash, files, revision
 		FROM current_book WHERE deleted = false ORDER BY entity_id`)
 	if err != nil {
 		return nil, err
@@ -266,7 +291,7 @@ func (s *PGBookStore) SnapshotLibrary(ctx context.Context) (json.RawMessage, err
 	for rows.Next() {
 		var it model.BookSnapshotItem
 		var cover any
-		if err := rows.Scan(&it.UUID, &it.Name, &it.CurrentPage, &cover, &it.Files); err != nil {
+		if err := rows.Scan(&it.UUID, &it.Name, &it.CurrentPage, &cover, &it.Files, &it.Revision); err != nil {
 			return nil, err
 		}
 		// pgx 把 TEXT 列扫成 string（或 []byte），两种都兼容

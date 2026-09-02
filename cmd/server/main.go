@@ -65,6 +65,8 @@ func run() error {
 	cursorStore := store.NewPGCursorStore(pool)
 	conflictStore := store.NewPGConflictStore(pool)
 	syncSvc := service.NewSyncService(entityStore, bookStore, historyStore, eventStore, cursorStore, conflictStore)
+	// 库版本机制（§4）：每次变更后重算整库版本 hash，供并发检测/初始化同步匹配
+	syncSvc.SetLibraryStore(store.NewPGLibraryVersionStore(pool))
 
 	// 文件同步（MinIO 可选：未配置时文件接口返回 503）
 	var fileSvc *service.FileService
@@ -85,6 +87,9 @@ func run() error {
 		log.Printf("minio: bucket %q ready", cfg.MinIOBucket)
 	}
 
+	// 书籍上传任务（需要 BookStore 落库；MinIO 缺失时也无意义，但可独立建）
+	uploadSvc := service.NewUploadService(store.NewPGBookUploadStore(pool), bookStore)
+
 	router := api.NewRouter(&api.Dependencies{
 		Config:  cfg,
 		Auth:    authSvc,
@@ -92,6 +97,7 @@ func run() error {
 		Devices: deviceStore,
 		Sync:    syncSvc,
 		Files:   fileSvc,
+		Upload:  uploadSvc,
 	})
 
 	srv := &http.Server{

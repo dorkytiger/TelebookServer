@@ -56,8 +56,9 @@ type SyncStatus struct {
 
 // 实体操作类型。
 const (
-	OpUpsert = "upsert"
-	OpDelete = "delete"
+	OpUpsert   = "upsert"
+	OpDelete   = "delete"
+	OpProgress = "progress" // 仅阅读进度（§3/§4）：不改 revision/book_version，不记快照
 )
 
 // 实体类型。
@@ -117,12 +118,15 @@ type BookHistory struct {
 }
 
 // BookSnapshotItem 整库快照中的单本书（uuid + 书籍 payload）。
+// Revision 为服务器 current_book 当前版本号：/sync/books（全量清单）携带它，
+// 客户端下载/比对后回填本地 sync_state（§2.1.5 乐观锁基准）。
 type BookSnapshotItem struct {
 	UUID        string          `json:"uuid"`
 	Name        string          `json:"name"`
 	CurrentPage int             `json:"current_page"`
 	CoverHash   string          `json:"cover_hash"`
 	Files       json.RawMessage `json:"files"`
+	Revision    int64           `json:"revision"`
 }
 
 // BookRestoreResult 归档恢复结果。

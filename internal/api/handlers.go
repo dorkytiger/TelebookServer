@@ -259,3 +259,27 @@ func RestoreBookHandler(sync *service.SyncService) gin.HandlerFunc {
 		c.JSON(http.StatusOK, result)
 	}
 }
+
+// LibraryStatusHandler 返回服务端当前库状态（远程书数 + 整库版本）。
+func LibraryStatusHandler(sync *service.SyncService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		status, err := sync.GetLibraryStatus(c.Request.Context())
+		if err != nil {
+			respondError(c, http.StatusInternalServerError, "internal", "internal error")
+			return
+		}
+		c.JSON(http.StatusOK, status)
+	}
+}
+
+// LibraryBooksHandler 返回服务端全量书清单（含每本书文件清单），初始化同步用。
+func LibraryBooksHandler(sync *service.SyncService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		books, err := sync.GetLibraryBooks(c.Request.Context())
+		if err != nil {
+			respondError(c, http.StatusInternalServerError, "internal", "internal error")
+			return
+		}
+		c.Data(http.StatusOK, "application/json; charset=utf-8", books)
+	}
+}
