@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 
@@ -190,9 +189,8 @@ func FileCompleteUploadHandler(files *service.FileService) gin.HandlerFunc {
 	}
 }
 
-// FileDownloadHandler 生成预签名下载地址并 302 跳转。
-// 预签名 URL 的 host 从请求推断（X-Forwarded-Host 优先），
-// 保证手机拿到的地址与访问 API 的地址一致。
+// FileDownloadHandler 代理下载：API 从 MinIO 读取文件流式返回。
+// MinIO 无需公网端口（客户端只访问 API）；兼容原 302 预签名流程的调用方。
 func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		hash := c.Query("hash")
@@ -200,29 +198,27 @@ func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 			respondError(c, http.StatusUnprocessableEntity, "validation_error", "hash is required")
 			return
 		}
-		url, err := files.PresignDownload(c.Request.Context(), hash, requestHost(c.Request))
+		rc, err := files.Download(c.Request.Context(), hash)
 		if err != nil {
 			if errors.Is(err, store.ErrObjectNotFound) {
 				respondError(c, http.StatusNotFound, "not_found", "file not found")
 				return
 			}
+			// 记录详细错误，便于远程定位 MinIO 链路问题
+			log.Printf("file download failed: hash=%s err=%v", hash, err)
 			respondError(c, http.StatusInternalServerError, "internal", "internal error")
 			return
 		}
-		c.Redirect(http.StatusFound, url)
+		defer rc.Close()
+		// 图片统一以 image/* 返回；客户端按内容落盘，无需精确 MIME
+		c.Header("Content-Type", "application/octet-stream")
+		c.Header("Cache-Control", "public, max-age=31536000, immutable") // 内容寻址：hash 即指纹，可长缓存
+		c.Stream(func(w io.Writer) bool {
+			_, err := io.Copy(w, rc)
+			return err == nil // 返回 false 停止
+		})
 	}
 }
 
-// requestHost 返回客户端可达的主机名：优先 X-Forwarded-Host（反代场景），
-// 否则用请求 Host（去掉端口）。用于预签名 URL 自动推断 MinIO 公网地址。
-func requestHost(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-	// 去掉端口：预签名拼接端口用 MINIO_PUBLIC_PORT
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
-	}
-	return host
-}
+// requestHost 已不再需要（下载改为 API 代理，MinIO 无需公网端口）。
+// 保留占位说明避免误删 import 时混淆。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"TelebookServer/internal/model"
 	"TelebookServer/internal/store"
@@ -95,4 +96,14 @@ func (s *FileService) CompleteUpload(ctx context.Context, hash, uploadID string,
 // host 为客户端可达的主机名（从请求推断）；空则用存储内部地址。
 func (s *FileService) PresignDownload(ctx context.Context, hash, host string) (string, error) {
 	return s.objects.PresignDownload(ctx, objectKey(hash), host)
+}
+
+// Download 打开文件内容流（API 代理下载：MinIO 无需公网端口）。
+// 调用方负责 Close 返回的流；文件不存在返回 ErrObjectNotFound。
+func (s *FileService) Download(ctx context.Context, hash string) (io.ReadCloser, error) {
+	rc, err := s.objects.GetObject(ctx, objectKey(hash))
+	if err != nil {
+		return nil, err
+	}
+	return rc, nil
 }

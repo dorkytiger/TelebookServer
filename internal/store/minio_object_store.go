@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -169,6 +170,24 @@ func (s *MinioObjectStore) PresignDownload(ctx context.Context, key, host string
 		return "", errors.New("presign failed: nil url")
 	}
 	return url.String(), nil
+}
+
+// GetObject 打开对象内容（流式读取；供 API 代理下载，MinIO 无需公网端口）。
+func (s *MinioObjectStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	// 立即探测一次，区分"对象不存在"与"打开成功"
+	if _, err := obj.Stat(); err != nil {
+		obj.Close()
+		var resp minio.ErrorResponse
+		if errors.As(err, &resp) && resp.Code == "NoSuchKey" {
+			return nil, ErrObjectNotFound
+		}
+		return nil, err
+	}
+	return obj, nil
 }
 
 // 确保 ObjectStore 接口被满足。

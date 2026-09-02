@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -32,6 +34,8 @@ type ObjectStore interface {
 	// PresignDownload 生成可下载的预签名 URL。
 	// host 为客户端可达的主机名（如 "192.168.31.202"）；空则用存储内部地址。
 	PresignDownload(ctx context.Context, key, host string) (string, error)
+	// GetObject 打开对象内容（流式读取，调用方负责 Close）。
+	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
 }
 
 // MemoryObjectStore 内存对象存储（测试/本地调试用）。
@@ -107,4 +111,17 @@ func (s *MemoryObjectStore) PresignDownload(_ context.Context, key, _ string) (s
 		return "", ErrObjectNotFound
 	}
 	return "memory://" + key, nil
+}
+
+func (s *MemoryObjectStore) GetObject(_ context.Context, key string) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.objects[key]
+	if !ok {
+		return nil, ErrObjectNotFound
+	}
+	// 拷贝一份，避免调用方读取时与锁内引用冲突
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return io.NopCloser(bytes.NewReader(cp)), nil
 }
