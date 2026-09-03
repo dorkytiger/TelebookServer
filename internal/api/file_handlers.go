@@ -133,6 +133,10 @@ func FileUploadPartHandler(files *service.FileService) gin.HandlerFunc {
 
 		data, err := io.ReadAll(src)
 		if err != nil {
+			// 客户端在上传中途断开（慢网络/客户端超时）常导致读 body 失败，
+			// 记录详细错误便于定位（区别于服务端存储异常）
+			log.Printf("upload part read body failed: hash=%s part=%d err=%v",
+				hash, partNumber, err)
 			respondError(c, http.StatusInternalServerError, "internal", "internal error")
 			return
 		}
@@ -144,6 +148,8 @@ func FileUploadPartHandler(files *service.FileService) gin.HandlerFunc {
 				c.JSON(http.StatusOK, gin.H{"hash": hash, "complete": true})
 				return
 			}
+			log.Printf("upload part to storage failed: hash=%s part=%d err=%v",
+				hash, partNumber, err)
 			respondError(c, http.StatusInternalServerError, "internal", "internal error")
 			return
 		}
@@ -190,7 +196,7 @@ func FileCompleteUploadHandler(files *service.FileService) gin.HandlerFunc {
 }
 
 // FileDownloadHandler 代理下载：API 从 MinIO 读取文件流式返回。
-	// MinIO 无需公网端口（客户端只访问 API）；兼容原 302 预签名流程的调用方。
+// MinIO 无需公网端口（客户端只访问 API）；兼容原 302 预签名流程的调用方。
 func FileDownloadHandler(files *service.FileService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		hash := c.Query("hash")
