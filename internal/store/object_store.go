@@ -38,6 +38,9 @@ type ObjectStore interface {
 	GetObject(ctx context.Context, key string) (io.ReadCloser, int64, error)
 	// ObjectSize 返回对象实际大小（用于校验；不存在返回 ErrObjectNotFound）。
 	ObjectSize(ctx context.Context, key string) (int64, error)
+	// PutObject 整文件直传（iOS 后台 URLSession / 小文件直传用）：
+	// 流式写入对象（单 PUT，无 S3 分片 5MB 限制）。
+	PutObject(ctx context.Context, key string, size int64, reader io.Reader) error
 }
 
 // MemoryObjectStore 内存对象存储（测试/本地调试用）。
@@ -136,4 +139,18 @@ func (s *MemoryObjectStore) ObjectSize(_ context.Context, key string) (int64, er
 		return 0, ErrObjectNotFound
 	}
 	return int64(len(data)), nil
+}
+
+func (s *MemoryObjectStore) PutObject(_ context.Context, key string, size int64, reader io.Reader) error {
+	data, err := io.ReadAll(io.LimitReader(reader, size))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return fmt.Errorf("direct upload size mismatch: got %d want %d", len(data), size)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objects[key] = data
+	return nil
 }

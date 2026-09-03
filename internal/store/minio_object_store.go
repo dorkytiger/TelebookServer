@@ -153,6 +153,12 @@ func (s *MinioObjectStore) CompleteUpload(ctx context.Context, key, uploadID str
 	return err
 }
 
+// PutObject 整文件直传（单 PUT）：MB 级图片等直接写对象，无分片 5MB 限制。
+func (s *MinioObjectStore) PutObject(ctx context.Context, key string, size int64, reader io.Reader) error {
+	_, err := s.client.PutObject(ctx, s.bucket, key, reader, size, minio.PutObjectOptions{})
+	return err
+}
+
 func (s *MinioObjectStore) PresignDownload(ctx context.Context, key, host string) (string, error) {
 	exists, err := s.HasObject(ctx, key)
 	if err != nil {

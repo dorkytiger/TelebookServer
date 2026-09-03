@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -115,5 +116,33 @@ func TestFileCompleteMissingPart(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing part")
+	}
+}
+
+func TestFileDirectUpload(t *testing.T) {
+	s := newTestFileService()
+	ctx := context.Background()
+
+	// 首次直传成功
+	if err := s.DirectUpload(ctx, "direct-hash", 6, bytes.NewReader([]byte("abcdef"))); err != nil {
+		t.Fatalf("direct upload: %v", err)
+	}
+	sz, err := s.objects.ObjectSize(ctx, "files/direct-hash")
+	if err != nil || sz != 6 {
+		t.Fatalf("object size: %d err=%v", sz, err)
+	}
+
+	// 幂等：同 hash+size 再次直传 → 跳过（reader 不消费也不出错）
+	if err := s.DirectUpload(ctx, "direct-hash", 6, bytes.NewReader([]byte("abcdef"))); err != nil {
+		t.Fatalf("direct upload (idempotent): %v", err)
+	}
+
+	// 大小不符 → 视为损坏，允许覆盖重传
+	if err := s.DirectUpload(ctx, "direct-hash", 3, bytes.NewReader([]byte("xyz"))); err != nil {
+		t.Fatalf("direct upload overwrite: %v", err)
+	}
+	sz, _ = s.objects.ObjectSize(ctx, "files/direct-hash")
+	if sz != 3 {
+		t.Fatalf("expected overwritten size 3, got %d", sz)
 	}
 }

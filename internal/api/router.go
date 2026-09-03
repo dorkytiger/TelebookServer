@@ -52,6 +52,7 @@ func NewRouter(deps *Dependencies) *gin.Engine {
 
 			if deps.Files != nil {
 				authed.POST("/files/check", CheckFilesHandler(deps.Files))
+				authed.POST("/files/upload/direct", FileDirectUploadHandler(deps.Files))
 				authed.POST("/files/upload/init", FileInitUploadHandler(deps.Files))
 				authed.POST("/files/upload", FileUploadPartHandler(deps.Files))
 				authed.POST("/files/upload/complete", FileCompleteUploadHandler(deps.Files))

@@ -91,6 +91,31 @@ func CheckFilesHandler(files *service.FileService) gin.HandlerFunc {
 	}
 }
 
+// FileDirectUploadHandler 整文件直传（iOS 后台 URLSession uploadTask / MB 级图片直传）。
+// 查询参数：hash、size；请求体 = 原始文件流（非 multipart）。
+// 幂等：对象已存在且大小一致 → 直接返回 complete=true（跨设备去重）。
+func FileDirectUploadHandler(files *service.FileService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		hash := c.Query("hash")
+		sizeStr := c.Query("size")
+		if hash == "" || sizeStr == "" {
+			respondError(c, http.StatusUnprocessableEntity, "validation_error", "hash and size are required")
+			return
+		}
+		size, err := strconv.ParseInt(sizeStr, 10, 64)
+		if err != nil || size < 0 {
+			respondError(c, http.StatusUnprocessableEntity, "validation_error", "invalid size")
+			return
+		}
+		if err := files.DirectUpload(c.Request.Context(), hash, size, c.Request.Body); err != nil {
+			log.Printf("direct upload failed: hash=%s size=%d err=%v", hash, size, err)
+			respondError(c, http.StatusInternalServerError, "internal", "internal error")
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"hash": hash, "complete": true})
+	}
+}
+
 // FileInitUploadHandler 初始化分片上传。
 func FileInitUploadHandler(files *service.FileService) gin.HandlerFunc {
 	return func(c *gin.Context) {

@@ -128,6 +128,23 @@ func (s *FileService) CompleteUpload(ctx context.Context, hash, uploadID string,
 	return s.files.UpsertMeta(ctx, hash, size, "")
 }
 
+// DirectUpload 整文件直传（iOS 后台 URLSession uploadTask / MB 级图片直传）：
+// 对象已存在且大小一致 → 幂等跳过；否则整文件单 PUT 写入并登记 file_meta。
+func (s *FileService) DirectUpload(ctx context.Context, hash string, size int64, reader io.Reader) error {
+	if hash == "" || size < 0 {
+		return errors.New("invalid direct upload params")
+	}
+	key := objectKey(hash)
+	// 幂等：对象已存在且大小一致（另一设备/上次已传完）→ 跳过
+	if sz, err := s.objects.ObjectSize(ctx, key); err == nil && sz == size {
+		return nil
+	}
+	if err := s.objects.PutObject(ctx, key, size, reader); err != nil {
+		return fmt.Errorf("direct upload: %w", err)
+	}
+	return s.files.UpsertMeta(ctx, hash, size, "")
+}
+
 // PresignDownload 生成下载地址（302 重定向目标）。
 // host 为客户端可达的主机名（从请求推断）；空则用存储内部地址。
 func (s *FileService) PresignDownload(ctx context.Context, hash, host string) (string, error) {
