@@ -48,13 +48,21 @@ func run() error {
 
 	// refresh token 存储：配了 Redis 用 Redis，否则内存（重启失效）
 	var tokenStore store.TokenStore = store.NewMemoryTokenStore()
+	var orderStore store.UploadOrderStore = store.NewMemoryUploadOrderStore()
 	if cfg.RedisAddr != "" {
 		redisStore, err := store.NewRedisTokenStore(cfg.RedisAddr)
 		if err != nil {
 			return err
 		}
 		tokenStore = redisStore
-		log.Printf("redis: refresh token store ready (%s)", cfg.RedisAddr)
+		// 上传文件顺序缓存（init 缓存客户端清单顺序 → complete 按它落库）。
+		// redis 崩了丢失也无妨：客户端 complete 报错后重新 init 即重建（§8.2 幂等）。
+		ordStore, err := store.NewRedisUploadOrderStore(cfg.RedisAddr)
+		if err != nil {
+			return err
+		}
+		orderStore = ordStore
+		log.Printf("redis: refresh token & upload order store ready (%s)", cfg.RedisAddr)
 	}
 	authSvc := service.NewAuthService(deviceStore, tokenStore, jwtSvc, cfg.SyncSecret, cfg.RefreshTTL)
 
@@ -88,7 +96,7 @@ func run() error {
 	}
 
 	// 书籍上传任务（需要 BookStore 落库；MinIO 缺失时也无意义，但可独立建）
-	uploadSvc := service.NewUploadService(store.NewPGBookUploadStore(pool), bookStore)
+	uploadSvc := service.NewUploadService(store.NewPGBookUploadStore(pool), bookStore, orderStore)
 
 	router := api.NewRouter(&api.Dependencies{
 		Config:  cfg,

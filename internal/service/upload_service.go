@@ -20,10 +20,13 @@ var ErrUploadIncomplete = errors.New("upload incomplete")
 type UploadService struct {
 	uploads store.BookUploadStore
 	books   store.BookStore
+	orders  store.UploadOrderStore
 }
 
-func NewUploadService(uploads store.BookUploadStore, books store.BookStore) *UploadService {
-	return &UploadService{uploads: uploads, books: books}
+// NewUploadService 创建上传编排服务。orders 负责缓存客户端上报的文件顺序
+// （complete 落库时按它重建 files，避免页序被打乱；可为 redis 或内存实现）。
+func NewUploadService(uploads store.BookUploadStore, books store.BookStore, orders store.UploadOrderStore) *UploadService {
+	return &UploadService{uploads: uploads, books: books, orders: orders}
 }
 
 // InitUpload 为客户端上报的一组书创建上传任务，返回每本书分配的 uuid + 待上传清单。
@@ -32,6 +35,11 @@ func (s *UploadService) InitUpload(ctx context.Context, deviceID string, req mod
 	for _, b := range req.Books {
 		task, pending, err := s.uploads.InitUpload(ctx, b.UUID, b.Name, b.DataVersion, deviceID, b.Files)
 		if err != nil {
+			return nil, err
+		}
+		// 缓存客户端上报的文件顺序（= 书籍页序）：complete 落库按它重建，
+		// 不再从 book_upload_file 无序读取导致页序错乱（§7.4）。
+		if err := s.orders.SaveOrder(ctx, task.UUID, b.Files); err != nil {
 			return nil, err
 		}
 		resp.Books = append(resp.Books, model.UploadInitBookResult{
@@ -72,6 +80,13 @@ func (s *UploadService) Complete(ctx context.Context, deviceID, uuid string) (*m
 	if err != nil {
 		return nil, err
 	}
+	// 先取缓存顺序（= 页序）再落库：缓存缺失（redis 崩/重启）时任务保持
+	// uploading，客户端重新 init（§8.2 幂等重建 + 重写缓存）后重试 complete，
+	// 不会出现"任务已 done 但书未落库"的中间态。
+	payload, err := s.uploadPayload(ctx, uuid, task)
+	if err != nil {
+		return nil, err
+	}
 	complete, err := s.uploads.Complete(ctx, uuid)
 	if err != nil {
 		return nil, err
@@ -80,11 +95,6 @@ func (s *UploadService) Complete(ctx context.Context, deviceID, uuid string) (*m
 		return &model.UploadCompleteResponse{UUID: uuid, Done: false, Reason: "incomplete"}, nil
 	}
 	// 全部文件 done → 落库 current_book（用 ForceUpsertBook：服务器权威写入 + 事件）
-	// 文件清单从 book_upload_file 读取（status=done）构造 payload
-	payload, err := s.uploadPayload(ctx, uuid, task)
-	if err != nil {
-		return nil, err
-	}
 	outcome, err := s.books.ForceUpsertBook(ctx, uuid, payload, deviceID)
 	if err != nil {
 		return nil, err
@@ -102,9 +112,13 @@ func (s *UploadService) MarkFailed(ctx context.Context, uuid string) error {
 	return s.uploads.MarkFailed(ctx, uuid)
 }
 
-// uploadPayload 从 book_upload_file 构造 BookPayload（name + 全部文件清单）。
+// uploadPayload 构造 BookPayload（name + 全部文件清单）。
+//
+// 文件顺序以 init 时缓存的客户端清单为准（= 书籍页序）：从 book_upload_file
+// 无序重建无法保证页序（上传任务可能被 DELETE+重插、行物理顺序变化）。
+// 缓存缺失（redis 崩/重启）→ 返回 ErrUploadOrderLost，客户端重新 init 重试。
 func (s *UploadService) uploadPayload(ctx context.Context, uuid string, task *model.UploadBookTask) (json.RawMessage, error) {
-	fullFiles, err := s.uploads.ListAllFiles(ctx, uuid)
+	fullFiles, err := s.orders.LoadOrder(ctx, uuid)
 	if err != nil {
 		return nil, err
 	}

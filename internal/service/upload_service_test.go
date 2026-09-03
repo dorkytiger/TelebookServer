@@ -130,7 +130,7 @@ func TestUploadComplete(t *testing.T) {
 	ctx := context.Background()
 	mem := store.NewMemorySyncStore()
 	up := newMemUploadStore()
-	svc := NewUploadService(up, mem)
+	svc := NewUploadService(up, mem, store.NewMemoryUploadOrderStore())
 
 	// init
 	initResp, err := svc.InitUpload(ctx, "dev1", model.UploadInitRequest{
@@ -194,7 +194,7 @@ func TestUploadStatusResume(t *testing.T) {
 	ctx := context.Background()
 	mem := store.NewMemorySyncStore()
 	up := newMemUploadStore()
-	svc := NewUploadService(up, mem)
+	svc := NewUploadService(up, mem, store.NewMemoryUploadOrderStore())
 
 	initResp, _ := svc.InitUpload(ctx, "dev1", model.UploadInitRequest{
 		Books: []model.UploadInitBook{{
@@ -220,7 +220,7 @@ func TestUploadInitKeepsClientUUID(t *testing.T) {
 	ctx := context.Background()
 	mem := store.NewMemorySyncStore()
 	up := newMemUploadStore()
-	svc := NewUploadService(up, mem)
+	svc := NewUploadService(up, mem, store.NewMemoryUploadOrderStore())
 
 	// 客户端传 uuid → 服务器保留（§6 方案1）
 	resp, err := svc.InitUpload(ctx, "dev1", model.UploadInitRequest{
@@ -242,5 +242,111 @@ func TestUploadInitKeepsClientUUID(t *testing.T) {
 	})
 	if resp2.Books[0].UUID == "" {
 		t.Fatal("server should assign uuid when empty")
+	}
+}
+
+// 页序兜底：complete 落库的文件清单顺序 = 客户端 init 上报顺序
+// （不再从 book_upload_file 无序重建；缓存缺失 → ErrUploadOrderLost 提示重试）。
+func TestUploadCompletePreservesFileOrder(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemorySyncStore()
+	up := newMemUploadStore()
+	orders := store.NewMemoryUploadOrderStore()
+	svc := NewUploadService(up, mem, orders)
+
+	// init：客户端按页序上报（cover 最前，页码有序）
+	clientFiles := []model.BookFileMeta{
+		{RelPath: "cover.jpg", Hash: "hc", Size: 10},
+		{RelPath: "original/0000000", Hash: "h0", Size: 20},
+		{RelPath: "original/0000001", Hash: "h1", Size: 20},
+		{RelPath: "original/0000002", Hash: "h2", Size: 20},
+		{RelPath: "original/0000003", Hash: "h3", Size: 20},
+	}
+	resp, err := svc.InitUpload(ctx, "dev1", model.UploadInitRequest{
+		Books: []model.UploadInitBook{{
+			ClientID: "c1", Name: "页序书",
+			Files: clientFiles,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid := resp.Books[0].UUID
+	for _, f := range clientFiles {
+		if err := svc.MarkFileDone(ctx, uuid, f.Hash); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 缓存被外部打乱（模拟极端情况）也不影响 complete —— 顺序来自缓存而非表
+	orders.SaveOrder(ctx, uuid, []model.BookFileMeta{
+		clientFiles[4], clientFiles[0], clientFiles[2], clientFiles[1], clientFiles[3],
+	})
+
+	final, err := svc.Complete(ctx, "dev1", uuid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !final.Done {
+		t.Fatalf("complete should be done: %+v", final)
+	}
+
+	// 验证落库 payload 文件顺序 = 缓存顺序
+	snapshot, _ := mem.SnapshotLibrary(ctx)
+	var items []model.BookSnapshotItem
+	json.Unmarshal(snapshot, &items)
+	if len(items) != 1 {
+		t.Fatalf("book not persisted: %+v", items)
+	}
+	var payload model.BookPayload
+	payloadBytes, _ := json.Marshal(items[0])
+	json.Unmarshal(payloadBytes, &payload)
+	// 用事件 payload 更直接：SnapshotLibrary 里 files 是原始 JSON
+	if len(items[0].Files) == 0 {
+		t.Fatal("no files persisted")
+	}
+	// 直接解析 snapshot 的 files 字段顺序
+	var snapFiles []model.BookFileMeta
+	json.Unmarshal(items[0].Files, &snapFiles)
+	got := []string{}
+	for _, f := range snapFiles {
+		got = append(got, f.RelPath)
+	}
+	want := []string{"original/0000003", "cover.jpg", "original/0000001", "original/0000000", "original/0000002"}
+	if len(got) != len(want) {
+		t.Fatalf("file count mismatch got=%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order mismatch at %d: got %v want %v", i, got, want)
+		}
+	}
+}
+
+// 顺序缓存缺失（redis 崩/重启）：complete 报 ErrUploadOrderLost，不落库不标 done。
+func TestUploadCompleteOrderLost(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemorySyncStore()
+	up := newMemUploadStore()
+	orders := store.NewMemoryUploadOrderStore()
+	svc := NewUploadService(up, mem, orders)
+
+	resp, err := svc.InitUpload(ctx, "dev1", model.UploadInitRequest{
+		Books: []model.UploadInitBook{{
+			ClientID: "c1", Name: "书X",
+			Files: []model.BookFileMeta{{RelPath: "p.jpg", Hash: "h1", Size: 10}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uuid := resp.Books[0].UUID
+	// 故意删掉缓存（模拟 redis 重启丢数据）
+	orders.DeleteOrder(ctx, uuid)
+	if err := svc.MarkFileDone(ctx, uuid, "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Complete(ctx, "dev1", uuid); err != store.ErrUploadOrderLost {
+		t.Fatalf("expected ErrUploadOrderLost, got %v", err)
 	}
 }
